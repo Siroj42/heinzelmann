@@ -14,6 +14,7 @@ use steel_derive::Steel;
 use std::time::Duration;
 use rumqttc::{MqttOptions,  Client, Connection, Event, QoS, Packet};
 use chrono::{DateTime, Local};
+use rand::{distributions::Alphanumeric, Rng};
 use bytes::Bytes;
 
 const PROGRAM_NAME: &'static str = "heinzelmann";
@@ -138,24 +139,51 @@ fn get_file_contents(location: &str) -> String {
     return contents;
 }
 
-/*
-fn make_set_hs100_closure(tx: mpsc::Sender<OutgoingMessage>) -> impl Fn(u8, bool) -> () {
-    return move |number, state| {
-        let state = match state {
-            true => "on",
-            false => "off",
-        };
-        let payload = format!("wifiplug_{}_{}", number, state);
-        let outmsg: OutgoingMessage = OutgoingMessage::new("hs100".into(), payload); 
-        tx.send(outmsg).unwrap();
-    };
-}*/
-
 fn make_send_simple_closure(tx: mpsc::Sender<OutgoingMessage>) -> impl Fn(String, String) -> () {
     return move |topic, payload| {
         let outmsg: OutgoingMessage = OutgoingMessage::new(topic, payload); 
         tx.send(outmsg).unwrap();
     };
+}
+
+fn replace_str(s: String, a: String, b: String) -> String {
+    return s.replace(&a, &b);
+}
+
+fn replace_strs(s: String, a: Vec<String>, b: Vec<String>) -> String {
+    let mut result = s;
+    let x = if a.len() < b.len() {a.len()} else {b.len()};
+    for i in 0..x {
+        result = result.replace(&a[i], &b[i]);
+    }
+    return result;
+}
+
+fn get_string_contains(s: String, subs: String) -> bool {
+    return s.contains(&subs);
+}
+
+fn get_timestamp() -> String {
+    return Local::now().timestamp().to_string();
+}
+
+fn get_md5(inputs: Vec<String>) -> String {
+    let mut context = md5::Context::new();
+    for input in inputs {
+        context.consume(input);
+    }
+    let digest: [u8; 16] = context.compute().into();
+    let hexdigest = hex::encode(digest);
+    return hexdigest;
+}
+
+fn get_random_string(length: usize) -> String {
+    let s: String = rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(length)
+        .map(char::from)
+        .collect();
+    return s.to_lowercase();
 }
 
 fn encode_payload(text: String) -> Bytes {
@@ -180,12 +208,16 @@ fn init_vm(otx: Option<mpsc::Sender<OutgoingMessage>>) -> Engine {
     let mut vm = Engine::new();
     vm.register_type::<TimedEvent>("TimedEvent?");
     vm.register_fn("TimedEvent", TimedEvent::register);
+    vm.register_fn("replace-str", replace_str);
+    vm.register_fn("replace-strs", replace_strs);
+    vm.register_fn("string-contains", get_string_contains);
+    vm.register_fn("current-timestamp", get_timestamp);
+    vm.register_fn("random-string", get_random_string);
+    vm.register_fn("md5", get_md5);
     if let Some(otx) = otx {
-//        vm.register_fn("set-light", make_set_hs100_closure(otx.clone()));
         vm.register_fn("send-simple", make_send_simple_closure(otx));
     }
     else {
-//        vm.register_fn("set-light", |_: bool| ());
         vm.register_fn("send-simple", |_: String, _: String| ());
     }
     return vm;
@@ -200,7 +232,7 @@ fn vm_spawner_thread(irx: mpsc::Receiver<IncomingMessage>, otx: mpsc::Sender<Out
             vm.compile_and_run_raw_program(&program).unwrap();
             let func = vm.extract_value(&inc.topic).unwrap();
             let content = SteelVal::StringV(inc.content.into());
-            vm.call_function_with_args(func, vec![content]).unwrap();
+            let _ = vm.call_function_with_args(func, vec![content]);
         });
     }
 }
@@ -208,7 +240,7 @@ fn vm_spawner_thread(irx: mpsc::Receiver<IncomingMessage>, otx: mpsc::Sender<Out
 fn mqtt_client_thread(client: Client, rx: mpsc::Receiver<OutgoingMessage>) {
     let mut client = client.clone();
     for inc in rx {
-        thread::sleep(Duration::from_secs(1));
+        thread::sleep(Duration::from_millis(10));
         let payload = encode_payload(inc.text);
         client.publish(inc.topic, QoS::AtLeastOnce, false, payload).unwrap();
     }
