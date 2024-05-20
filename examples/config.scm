@@ -3,4 +3,4 @@
 (define broker_port 1883)
 (define broker_user "user")
 (define broker_pass "password")
-(define program_location "examples/program.scm")
+(define program_location "examples/hs100.scm")

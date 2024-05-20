@@ -5,51 +5,31 @@
 */
 
 use std::{env, fs};
-use std::ops::Deref;
 use std::sync::mpsc;
 use std::thread;
+use std::io::prelude::*;
+use std::io::stdout;
 use steel::{steel_vm::engine::Engine, SteelVal};
 use steel::steel_vm::register_fn::RegisterFn;
 use steel_derive::Steel;
 use std::time::Duration;
-use rumqttc::{MqttOptions,  Client, Connection, Event, QoS, Packet};
+use rumqttc::{MqttOptions,  Client, Connection, Event, Packet};
 use chrono::{DateTime, Local};
-use rand::{distributions::Alphanumeric, Rng};
-use bytes::Bytes;
+use std::collections::HashMap;
+
+mod utils; 
 
 const PROGRAM_NAME: &'static str = "heinzelmann";
-
-struct IncomingMessage {
-    topic: String,
-    content: String,
-}
-
-impl IncomingMessage {
-    fn new(topic: String, content: String) -> Self {
-        return Self { topic, content, };
-    }
-}
-
-struct OutgoingMessage {
-    topic: String,
-    text: String,
-}
-
-impl OutgoingMessage {
-    fn new(topic: String, text: String) -> Self {
-        return Self { topic, text, };
-    }
-}
 
 #[derive(Clone, Debug, Steel, PartialEq)]
 struct TimedEvent {
     time: (u32, u32),
-    topic: String,
+    id: String,
 }
 
 impl TimedEvent {
-    fn new(time: (u32, u32), topic: String) -> Self {
-        return Self { time, topic, };
+    fn new(time: (u32, u32), id: String) -> Self {
+        return Self { time, id, };
     }
     fn register(time: String, topic: String) -> Self {
         let split: Vec<&str> = time.split(':').collect();
@@ -82,7 +62,7 @@ impl Configuration {
         return Configuration { id, program_location, addr, port, user, password };
     }
 
-    fn from_config_program(program: String) -> Configuration{
+    fn from_config_program(program: String) -> Configuration {
         let mut vm = Engine::new();
         vm.compile_and_run_raw_program(&program).unwrap();
 
@@ -139,110 +119,234 @@ fn get_file_contents(location: &str) -> String {
     return contents;
 }
 
-fn make_send_simple_closure(tx: mpsc::Sender<OutgoingMessage>) -> impl Fn(String, String) -> () {
-    return move |topic, payload| {
-        let outmsg: OutgoingMessage = OutgoingMessage::new(topic, payload); 
-        tx.send(outmsg).unwrap();
-    };
+
+enum VMMessage {
+    Command(ReplCommand),
+    MqttConnect(Client),
+    TimersReady(mpsc::Sender<TimedEvent>),
 }
 
-fn replace_str(s: String, a: String, b: String) -> String {
-    return s.replace(&a, &b);
+struct ReplCommand {
+    cmd: String,
+    response_tx: mpsc::Sender<ReplResponse>,
 }
 
-fn replace_strs(s: String, a: Vec<String>, b: Vec<String>) -> String {
-    let mut result = s;
-    let x = if a.len() < b.len() {a.len()} else {b.len()};
-    for i in 0..x {
-        result = result.replace(&a[i], &b[i]);
+impl ReplCommand {
+    fn new(cmd: String, response_tx: mpsc::Sender<ReplResponse>) -> ReplCommand {
+        return ReplCommand { cmd, response_tx };
     }
-    return result;
-}
 
-fn get_string_contains(s: String, subs: String) -> bool {
-    return s.contains(&subs);
-}
-
-fn get_timestamp() -> String {
-    return Local::now().timestamp().to_string();
-}
-
-fn get_md5(inputs: Vec<String>) -> String {
-    let mut context = md5::Context::new();
-    for input in inputs {
-        context.consume(input);
-    }
-    let digest: [u8; 16] = context.compute().into();
-    let hexdigest = hex::encode(digest);
-    return hexdigest;
-}
-
-fn get_random_string(length: usize) -> String {
-    let s: String = rand::thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(length)
-        .map(char::from)
-        .collect();
-    return s.to_lowercase();
-}
-
-fn encode_payload(text: String) -> Bytes {
-    return Bytes::from(text);
-}
-
-fn process_event(event: Event, tx: mpsc::Sender<IncomingMessage>) {
-    let packet = match event {
-        Event::Incoming(packet) => packet,
-        _ => return,
-    };
-    let publish = match packet {
-        Packet::Publish(publish) => publish,
-        _ => return,
-    };
-    let topic: String = publish.topic;
-    let content: String = std::str::from_utf8(&publish.payload).unwrap().to_string();
-    tx.send(IncomingMessage::new(topic, content)).unwrap();
-}
-
-fn init_vm(otx: Option<mpsc::Sender<OutgoingMessage>>) -> Engine {
-    let mut vm = Engine::new();
-    vm.register_type::<TimedEvent>("TimedEvent?");
-    vm.register_fn("TimedEvent", TimedEvent::register);
-    vm.register_fn("replace-str", replace_str);
-    vm.register_fn("replace-strs", replace_strs);
-    vm.register_fn("string-contains", get_string_contains);
-    vm.register_fn("current-timestamp", get_timestamp);
-    vm.register_fn("random-string", get_random_string);
-    vm.register_fn("md5", get_md5);
-    if let Some(otx) = otx {
-        vm.register_fn("send-simple", make_send_simple_closure(otx));
-    }
-    else {
-        vm.register_fn("send-simple", |_: String, _: String| ());
-    }
-    return vm;
-}
-
-fn vm_spawner_thread(irx: mpsc::Receiver<IncomingMessage>, otx: mpsc::Sender<OutgoingMessage>, program: &str) {
-    for inc in irx {
-        let otx = otx.clone();
-        let program = program.to_owned();
-        thread::spawn( move || {
-            let mut vm = init_vm(Some(otx));
-            vm.compile_and_run_raw_program(&program).unwrap();
-            let func = vm.extract_value(&inc.topic).unwrap();
-            let content = SteelVal::StringV(inc.content.into());
-            let _ = vm.call_function_with_args(func, vec![content]);
-        });
+    fn create(cmd: String) -> (ReplCommand, mpsc::Receiver<ReplResponse>) {
+        let (resp_tx, resp_rx): (mpsc::Sender<ReplResponse>, mpsc::Receiver<ReplResponse>) = mpsc::channel();
+        let repl_cmd = ReplCommand::new(cmd, resp_tx);
+        return (repl_cmd, resp_rx);
     }
 }
 
-fn mqtt_client_thread(client: Client, rx: mpsc::Receiver<OutgoingMessage>) {
-    let mut client = client.clone();
+#[derive(Clone, Debug, Steel, PartialEq)]
+enum HooksVariant {
+    Simple,
+    Tree,
+}
+
+#[derive(Clone, Debug, Steel, PartialEq)]
+struct Hooks {
+    variant: HooksVariant,
+    hooks: HashMap<String, SteelVal>,
+}
+
+impl Hooks {
+    fn new(variant: HooksVariant) -> Hooks {
+        let hooks = HashMap::new();
+        return Hooks { variant, hooks };
+    }
+    fn add_hook(&mut self, topic: SteelVal, f: SteelVal) -> SteelVal {
+        if let SteelVal::StringV(s) = topic {
+            self.hooks.insert(s.to_string(), f);
+            return true.into();
+        }
+        else {
+            return false.into();
+        }
+    }
+    fn find_hook(&self, topic: SteelVal) -> SteelVal {
+        if let SteelVal::StringV(s) = topic {
+            let f = self.hooks.get(&s.to_string());
+            match self.variant {
+                HooksVariant::Simple => {
+                    if let Some(f) = f {
+                        return f.clone();
+                    }
+                },
+                HooksVariant::Tree => {
+                    let mut f = f;
+                    let mut topic_parts: Vec<String> = s.split("/").map(|s| String::from(s.to_owned())).collect();
+                    if s.starts_with("/") {
+                        topic_parts.remove(0);
+                        topic_parts[0] = "/".to_string() + &topic_parts[0];
+                    }
+                    while f == None && topic_parts.len() > 0 {
+                        topic_parts = topic_parts[0..topic_parts.len()-1].to_vec();
+                        let s = topic_parts.join("/") + "/#";
+                        f = self.hooks.get(&s);
+                    }
+                    if let Some(f) = f {
+                        return f.clone();
+                    }
+                    else if let Some(f) = self.hooks.get("#") {
+                        return f.clone();
+                    }
+                },
+            }
+        }
+        return false.into();
+    }
+}
+
+fn timer_thread(repl_tx: mpsc::Sender<VMMessage>) {
+    let timer_guy = timer::Timer::new();
+    let mut guards = vec![];
+
+    let (tx, rx): (mpsc::Sender<TimedEvent>, mpsc::Receiver<TimedEvent>) = mpsc::channel();
+    repl_tx.send(VMMessage::TimersReady(tx)).unwrap();
+
     for inc in rx {
-        thread::sleep(Duration::from_millis(10));
-        let payload = encode_payload(inc.text);
-        client.publish(inc.topic, QoS::AtLeastOnce, false, payload).unwrap();
+        let rtx = repl_tx.clone();
+        let _guard = timer_guy.schedule(
+                inc.get_next_time(), 
+                Some(chrono::Duration::days(1)), 
+                move || {
+                    let cmd = format!(r#"(handle-timer "{}")"#, inc.id);
+                    let (replcmd, rx) = ReplCommand::create(cmd);
+                    rtx.send(VMMessage::Command(replcmd)).unwrap();
+                    rx.recv().unwrap();
+                });
+        guards.push(_guard);
+    }
+}
+
+fn vm_thread(rx: mpsc::Receiver<VMMessage>, program: String) {
+    let mut vm = Engine::new();
+
+    // REGISTERING BASIC UTILITY FUNCTIONS
+
+    // Generates a random string of a specified length. Useful for message identifiers like those
+    // that the Meross plugs use.
+    vm.register_fn("random-string", utils::random_string);
+    // Returns the current unix time stamp as an integer. This will be removed in favour of the
+    // steel's integrated current-second function as soon as we upgrade steel.
+    vm.register_fn("current-timestamp", utils::current_timestamp);
+    // Returns the md5 hash of a list of strings as a string. Meross needs this, and maybe some
+    // other systems as well.
+    vm.register_fn("md5", utils::get_md5);
+
+    // SETTING UP HOOKS IMPLEMENTATION
+    
+    let f: SteelVal = vm.run(r#"
+        (lambda (topic msg)
+          (displayln (string-append "Got message '" msg "' on topic '" topic "'.")))
+        "#).unwrap().last().unwrap().clone();
+
+    vm.register_type::<Hooks>("Hooks?");
+    vm.register_fn("add-hook!", Hooks::add_hook);
+    vm.register_fn("find-hook", Hooks::find_hook);
+
+    // SETTING UP EVENT HOOKS
+    let mut event_hooks = Hooks::new(HooksVariant::Tree);
+    event_hooks.add_hook(SteelVal::StringV("#".into()), f);
+    vm.register_external_value("event-hooks", event_hooks).unwrap();
+
+    // SETTING UP TIMER HOOKS
+    let timer_hooks = Hooks::new(HooksVariant::Simple);
+    vm.register_external_value("timer-hooks", timer_hooks).unwrap();
+
+    vm.run(r#"
+            (define (handle-event topic msg) 
+              ((find-hook event-hooks topic) topic msg))
+            (define (handle-timer id)
+              ((find-hook timer-hooks id)))
+
+            (define (register-event! topic f) 
+              (add-hook! event-hooks topic f))
+            (define (register-timer! id f) 
+              (add-hook! timer-hooks id f))
+           "#).unwrap();
+
+    // RUNNING PROGRAM
+    let mut pre_flight_checks_mqtt = false;
+    let mut pre_flight_checks_timers = false;
+    let mut program_run = false;
+    for inc in rx {
+        match inc {
+            VMMessage::Command(cmd) => {
+                let result = vm.compile_and_run_raw_program(&cmd.cmd);
+                match result {
+                    Ok(r) => match r.last() {
+                        Some(v) => match v {
+                            SteelVal::Void => cmd.response_tx.send(ReplResponse::Empty).unwrap(),
+                            SteelVal::StringV(s) => cmd.response_tx.send(ReplResponse::Return(s.to_string())).unwrap(),
+                            _ => {
+                                if let SteelVal::StringV(s) = vm.call_function_by_name_with_args("to-string", vec![v.to_owned()]).unwrap() {
+                                    cmd.response_tx.send(ReplResponse::Return(s.to_string())).unwrap();
+                                }
+                            }
+                        },
+                        None => cmd.response_tx.send(ReplResponse::Empty).unwrap(),
+                    },
+                    Err(e) => {
+                        vm.raise_error(e.clone());
+                        cmd.response_tx.send(ReplResponse::Error(e.to_string())).unwrap();
+                    },
+                };
+            },
+            VMMessage::MqttConnect(c) => {
+                vm.register_fn("send-simple", utils::send_closure(c.clone(), false));
+                vm.register_fn("send-retain", utils::send_closure(c.clone(), true));
+                vm.register_fn("subscribe", utils::subscribe_closure(c));
+                pre_flight_checks_mqtt = true;
+            },
+            VMMessage::TimersReady(tx) => {
+                vm.register_fn("set-timer", utils::set_timer_closure(tx));
+                pre_flight_checks_timers = true;
+            },
+        }
+        if !program_run && pre_flight_checks_mqtt && pre_flight_checks_timers {
+            vm.compile_and_run_raw_program(&program).unwrap(); //TODO: Signify when the service fails because the provided program fails
+            program_run = true;
+        }
+    }
+}
+
+
+
+enum ReplResponse {
+    Empty,
+    Return(String),
+    Error(String),
+}
+
+fn repl_thread(tx: mpsc::Sender<VMMessage>) {
+    let stdin = std::io::stdin();
+    let mut buf = String::new();
+
+    loop {
+        print!(">>> ");
+        stdout().flush().unwrap();
+        stdin.read_line(&mut buf).unwrap();
+        let tx_line = buf.clone()
+            .strip_suffix("\n").unwrap()
+            .to_string();
+        if tx_line.starts_with("(quit)") {
+            break;
+        }
+        let (repl_cmd, resp_rx) = ReplCommand::create(tx_line);
+        tx.send(VMMessage::Command(repl_cmd)).unwrap();
+        buf = "".into();
+        match resp_rx.recv().unwrap() {
+            ReplResponse::Empty => println!("=> ()"),
+            ReplResponse::Return(s) => println!("=> {}", s),
+            ReplResponse::Error(_) => {},
+        }
     }
 }
 
@@ -259,52 +363,33 @@ fn main() {
     };
     let config_program = get_file_contents(&config_location);
     let config = Configuration::from_config_program(config_program);
-
     let program = config.get_program();
 
-    let (itx, irx): (mpsc::Sender<IncomingMessage>, mpsc::Receiver<IncomingMessage>) = mpsc::channel();
-    let (otx, orx): (mpsc::Sender<OutgoingMessage>, mpsc::Receiver<OutgoingMessage>) = mpsc::channel();
-    let (mut client, mut connection) = config.connect();
+    let (tx, rx): (mpsc::Sender<VMMessage>, mpsc::Receiver<VMMessage>) = mpsc::channel();
+    thread::spawn(move || vm_thread(rx, program));
 
-    let mut vm = init_vm(None);
-    vm.compile_and_run_raw_program(&program).unwrap();
-    let topics = vm.extract_value("topics").unwrap();
-    if let SteelVal::ListV(topics) =topics {
-        for topic in topics {
-            if let SteelVal::StringV(topic) = topic {
-                client.subscribe(topic.to_string(), QoS::AtMostOnce).unwrap();
-            }
+    let repl_tx = tx.clone();
+    thread::spawn(move || repl_thread(repl_tx));
+
+    let timer_tx = tx.clone();
+    thread::spawn(move || timer_thread(timer_tx));
+
+    let (client, mut conn) = config.connect();
+    tx.send(VMMessage::MqttConnect(client)).unwrap();
+
+    for (_, notification) in conn.iter().enumerate() {
+        let event = notification.unwrap();
+        match event {
+            Event::Incoming(packet) => match packet {
+                Packet::Publish(inc) => {
+                    let exp = format!(r#"(handle-event "{}" "{}")"#, inc.topic, str::replace(std::str::from_utf8(&inc.payload).unwrap(), "\"", "\\\""));
+                    let (cmd, rx) = ReplCommand::create(exp.into());
+                    tx.send(VMMessage::Command(cmd)).unwrap();
+                    rx.recv().unwrap();
+                },
+                _ => (),
+            },
+            _ => (),
         }
-    }
-
-    let mut my_timers: Vec<TimedEvent> = vec![];
-    let timers = vm.extract_value("timers").unwrap();
-    if let SteelVal::ListV(timers) = timers {
-        for timer in timers {
-            if let SteelVal::Custom(timer) = timer {
-                let t = &*timer.borrow();
-                let timer = t.deref().as_any_ref().downcast_ref::<TimedEvent>().unwrap();
-                my_timers.push(timer.clone());
-            }
-        }
-    }
-
-    let timer_guy = timer::Timer::new();
-    let mut guards = vec![];
-    for t in my_timers {
-        let tx = itx.clone();
-        let _guard = timer_guy.schedule(t.get_next_time(), Some(chrono::Duration::days(1)), move || {
-            let _ignored = tx.send(IncomingMessage::new(t.topic.clone(), "".into()));
-        });
-        guards.push(_guard);
-    };
-
-    thread::spawn(move || vm_spawner_thread(irx, otx, &program));
-    thread::spawn(move || mqtt_client_thread(client, orx));
-
-    println!("Started {}, listening for MQTT events...", PROGRAM_NAME);
-    
-    for (_, notification) in connection.iter().enumerate() {
-        process_event(notification.unwrap(), itx.clone());
     };
 }
