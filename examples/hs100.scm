@@ -17,13 +17,13 @@
 ;; Defines action when receiving MQTT message on lights/light1 with payload state_str
 (register-event! "lights/light1" 
   (lambda (_ state_str)
-    (if (= state_str "off") 
+    (if (string=? state_str "off") 
       (set-hs100 1 #false) 
       (set-hs100 1 #true))))
     
 ;; Defines action when receiving MQTT message on lights/light2 with a payload state_str
 (register-event! "lights/light2" 
   (lambda (_ state_str)
-    (if (= state_str "off") 
+    (if (string=? state_str "off") 
       (set-hs100 2 #false) 
       (set-hs100 2 #true))))

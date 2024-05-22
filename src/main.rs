@@ -7,8 +7,8 @@
 use std::{env, fs};
 use std::sync::mpsc;
 use std::thread;
-use std::io::prelude::*;
 use std::io::stdout;
+use std::io::prelude::*;
 use steel::{steel_vm::engine::Engine, SteelVal};
 use steel::steel_vm::register_fn::RegisterFn;
 use steel_derive::Steel;
@@ -18,6 +18,7 @@ use chrono::{DateTime, Local};
 use std::collections::HashMap;
 
 mod utils; 
+mod nrepl; 
 
 const PROGRAM_NAME: &'static str = "heinzelmann";
 
@@ -55,44 +56,62 @@ struct Configuration {
     port: u16,
     user: Option<String>,
     password: Option<String>,
+    local_repl: bool,
+    nrepl: Vec<String>,
 }
 
 impl Configuration {
-    fn new(id: String, program_location: String, addr: String, port: u16, user: Option<String>, password: Option<String>) -> Configuration {
-        return Configuration { id, program_location, addr, port, user, password };
+    fn new(id: String, program_location: String, addr: String, port: u16, user: Option<String>, password: Option<String>, local_repl: bool, nrepl: Vec<String>) -> Configuration {
+        return Configuration { id, program_location, addr, port, user, password, local_repl, nrepl };
     }
 
     fn from_config_program(program: String) -> Configuration {
         let mut vm = Engine::new();
         vm.compile_and_run_raw_program(&program).unwrap();
 
-        let id = match vm.extract_value("client_id") {
+        let id = match vm.extract_value("client-id") {
             Result::Ok(val) => val.try_into().unwrap(),
             Result::Err(_) => PROGRAM_NAME.into(),
         };
 
-        let program_location = match vm.extract_value("program_location") {
+        let program_location = match vm.extract_value("program-location") {
             Result::Ok(val) => val.try_into().unwrap(),
             Result::Err(_) => format!("/etc/{}/program.scm", PROGRAM_NAME),
         };
 
-        let addr = vm.extract_value("broker_addr").unwrap().try_into().unwrap();
+        let addr = vm.extract_value("broker-addr").unwrap().try_into().unwrap();
 
-        let port = match vm.extract_value("broker_port") {
+        let port = match vm.extract_value("broker-port") {
             Result::Ok(val) => val.try_into().unwrap(),
             Result::Err(_) => 1883,
         };
 
-        let user = match vm.extract_value("broker_user") {
+        let user = match vm.extract_value("broker-user") {
             Result::Ok(val) => Some(val.try_into().unwrap()),
             Result::Err(_) => None,
         };
-        let password = match vm.extract_value("broker_pass") {
+        let password = match vm.extract_value("broker-pass") {
             Result::Ok(val) => Some(val.try_into().unwrap()),
             Result::Err(_) => None,
         };
 
-        return Configuration::new(id, program_location, addr, port, user, password);
+        let local_repl = match vm.extract_value("local-repl") {
+            Result::Ok(val) => val.as_bool().unwrap(),
+            Result::Err(_) => true,
+        };
+        let nrepl = match vm.extract_value("nrepl") {
+            Result::Ok(val) => {
+                let list = val.list().unwrap();
+                let mut vector: Vec<String> = vec![];
+                for s in list {
+                    vector.push(s.try_into().unwrap());
+                }
+                vector
+            },
+            Result::Err(_) => vec![],
+        };
+
+        return Configuration::new(id, program_location, addr, port, user, password, local_repl, nrepl);
     }
 
     fn connect(&self) -> (Client, Connection) {
@@ -317,8 +336,6 @@ fn vm_thread(rx: mpsc::Receiver<VMMessage>, program: String) {
     }
 }
 
-
-
 enum ReplResponse {
     Empty,
     Return(String),
@@ -368,8 +385,14 @@ fn main() {
     let (tx, rx): (mpsc::Sender<VMMessage>, mpsc::Receiver<VMMessage>) = mpsc::channel();
     thread::spawn(move || vm_thread(rx, program));
 
-    let repl_tx = tx.clone();
-    thread::spawn(move || repl_thread(repl_tx));
+    if config.local_repl {
+        let repl_tx = tx.clone();
+        thread::spawn(move || repl_thread(repl_tx));
+    }
+
+    let nrepl_tx = tx.clone();
+    let nrepl_config = config.nrepl.clone();
+    thread::spawn(move || nrepl::nrepl_thread(nrepl_tx, nrepl_config));
 
     let timer_tx = tx.clone();
     thread::spawn(move || timer_thread(timer_tx));
