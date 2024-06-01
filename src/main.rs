@@ -23,7 +23,7 @@ mod nrepl;
 const PROGRAM_NAME: &'static str = "heinzelmann";
 
 #[derive(Clone, Debug, Steel, PartialEq)]
-struct TimedEvent {
+pub struct TimedEvent {
     time: (u32, u32),
     id: String,
 }
@@ -139,13 +139,13 @@ fn get_file_contents(location: &str) -> String {
 }
 
 
-enum VMMessage {
+pub enum VMMessage {
     Command(ReplCommand),
     MqttConnect(Client),
     TimersReady(mpsc::Sender<TimedEvent>),
 }
 
-struct ReplCommand {
+pub struct ReplCommand {
     cmd: String,
     response_tx: mpsc::Sender<ReplResponse>,
 }

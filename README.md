@@ -9,7 +9,13 @@ Before trying the example, you need to point heinzelmann at an MQTT broker of yo
 Then, run `heinzelmann` via cargo and specify the config file:
 
 ```
-cargo run -- example/config.scm
+cargo run -- examples/config.scm
+```
+
+Or, run it with nix:
+
+```
+nix run . -- examples/config.scm
 ```
 
 The example programs at `example/hs100.scm` and `example/meross.scm` can give you an idea of what `heinzelmann` is currently capable of.

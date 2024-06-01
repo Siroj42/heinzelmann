@@ -343,7 +343,7 @@ dependencies = [
  "rumqttc",
  "serde",
  "steel-core",
- "steel-derive 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "steel-derive",
  "timer",
 ]
 
@@ -970,22 +970,11 @@ dependencies = [
  "serde",
  "serde_derive",
  "serde_json",
- "steel-derive 0.4.0 (git+https://github.com/mattwparas/steel.git)",
+ "steel-derive",
  "steel-gen",
  "steel-parser",
  "weak-table",
  "which",
-]
-
-[[package]]
-name = "steel-derive"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d224f21d85f77960f7233032606b984f97f9f3cba5ba2ced84762f33ddcb34b"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
 ]
 
 [[package]]
