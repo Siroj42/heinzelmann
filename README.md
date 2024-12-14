@@ -4,7 +4,7 @@ This little program helps you around the house by executing [MQTT](https://mqtt.
 
 ## Usage
 
-Before trying the example, you need to point heinzelmann at an MQTT broker of your choice. The relevant file is `example/config.scm`, where you can set your broker's URL and port as well as (optionally, otherwise, remove those lines) your login data. They can also be used to enable or disable the local REPL and add add IPs to the nREPL whitelist so you can connect to a REPL remotely (this is currently only tested with the [shevek](https://git.sr.ht/~technomancy/shevek/) client.
+Before trying the example, you need to point heinzelmann at an MQTT broker of your choice. The relevant file is `example/config.scm`, where you can set your broker's URL and port as well as (optionally, otherwise, remove those lines) your login data. They can also be used to enable or disable the local REPL and add add IPs to the nREPL whitelist so you can connect to a REPL remotely (this is currently only tested with the [shevek](https://git.sr.ht/~technomancy/shevek/) client).
 
 Then, run `heinzelmann` via cargo and specify the config file:
 

@@ -16,6 +16,15 @@
         packages = rec {
           default = heinzelmann;
           heinzelmann = pkgs.callPackage ./default.nix {};
+          container = pkgs.dockerTools.buildImage {
+            name = "heinzelmann";
+            config = { 
+              Cmd = [ "${heinzelmann}/bin/heinzelmann" ]; 
+              ExposedPorts = { 
+                "7888/tcp" = {}; # NRepl port
+              };
+            };
+          };
         };
         apps = rec {
           default = heinzelmann;
